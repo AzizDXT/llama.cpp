@@ -33,6 +33,9 @@
 
 #ifdef GGML_USE_OPENMP
 #include <omp.h>
+// libomp runtime extension (KMP_BLOCKTIME). Declared here explicitly because
+// omp.h variants differ in whether they expose it.
+extern void kmp_set_blocktime(int);
 #endif
 
 #ifdef GGML_USE_METAL
@@ -3840,6 +3843,17 @@ struct ggml_context * ggml_init(struct ggml_init_params params) {
     if (is_first_call) {
         // initialize time system (required on Windows)
         ggml_time_init();
+
+#ifdef GGML_USE_OPENMP
+        // BUG-0002b fix: when ggml's threadpool already saturates all cores
+        // (-t == nproc), libomp's default busy-wait (KMP_BLOCKTIME=200 ms) makes
+        // every worker spin in sched_yield between graph-compute regions and the
+        // run livelocks (observed: -t 24 on a 24-vCPU box, all threads at ~99%
+        // CPU, no progress). Previously misattributed to the quantized KV cache
+        // because the lab's KV-depth runs inherited the -t 24 default. Force OMP
+        // workers to sleep immediately instead of spinning.
+        kmp_set_blocktime(0);
+#endif
 
         // initialize GELU, Quick GELU, SILU and EXP F32 tables
         {
