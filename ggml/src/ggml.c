@@ -12608,6 +12608,27 @@ void matrixMultiply_int(const int M, const int N, const int K, const int32_t* A,
     }
 }
 
+
+// BUG-0001 fix: the I2_S GEMM/GEMV scratch buffers below were variable-length
+// arrays allocated on the stack. With few threads the per-thread row slice grows
+// (rows_per_thread x padded_cols floats) past the default 8 MiB stack and the
+// process SIGSEGVs (e.g. -t 1: gate/up 6912 x 512 x 4 B = 14.2 MiB). Use a
+// thread-local heap buffer that grows on demand instead.
+static float * ggml_i2s_scratch(int64_t nelem) {
+    static _Thread_local float * buf = NULL;
+    static _Thread_local int64_t cap = 0;
+    if (nelem > cap) {
+        free(buf);
+        buf = (float *) malloc(nelem * sizeof(float));
+        if (buf == NULL) {
+            cap = 0;
+            GGML_ABORT("ggml_i2s_scratch: failed to allocate %lld bytes", (long long) nelem * (long long) sizeof(float));
+        }
+        cap = nelem;
+    }
+    return buf;
+}
+
 static void ggml_compute_forward_mul_mat(
         const struct ggml_compute_params * params,
               struct ggml_tensor * dst) {
@@ -13258,7 +13279,7 @@ UseGgmlGemm2:;
         // If there are more than three rows in src1, use gemm; otherwise, use gemv.
         if (gemm && (ne11 > 3)) {
             if (src0->type == GGML_TYPE_I2_S) {
-                float tmp[(src0_end - src0_start)*(ne11 - ne11 % 4)];
+                float * tmp = ggml_i2s_scratch((src0_end - src0_start)*(ne11 - ne11 % 4));
                 const float * scale      = (float * )((uint8_t*) (src0->data) + (ne00 * ne01 / 4));
                 const float * act_scales = (const float*) ((const char *) src1_wdata + (ne11 * ne10));
                 const int32_t * act_sums   = (const int32_t*) ((const char *) act_scales + (ne11) * sizeof(float));
@@ -13278,7 +13299,7 @@ UseGgmlGemm2:;
         }
         for (int iter = gemm ? ne11 - ne11 % 4 : 0; iter < ne11; iter++) {
             if (src0->type == GGML_TYPE_I2_S) {
-                float tmp[src0_end - src0_start];
+                float * tmp = ggml_i2s_scratch(src0_end - src0_start);
                 const float * scale      = (float * )((uint8_t*) (src0->data) + (ne00 * ne01 / 4));
                 const float * act_scales = (const float*) ((const char *) src1_wdata + (ne11 * ne10));
                 const int32_t * act_sums   = (const int32_t*) ((const char *) act_scales + (ne11) * sizeof(float));
